@@ -35,7 +35,7 @@ class LRTracker(Callback):
         logs['lr'] = current_lr  # 确保学习率被记录到history中
 
 # 参数配置
-data_dir = '/kaggle/input/animals/Animal/Animal'  # 数据集路径
+data_dir = 'Animal'  # 数据集路径
 num_classes = 100
 img_size = (456, 456)  # B6模型推荐尺寸
 batch_size = 12  # 增加批次大小以提高GPU利用率
@@ -162,9 +162,9 @@ callbacks = [
         verbose=1
     ),
     ModelCheckpoint(
-        '/kaggle/working/best_model.keras', 
-        monitor='val_loss', 
-        save_best_only=True, 
+        'best_model.keras',
+        monitor='val_loss',
+        save_best_only=True,
         verbose=1
     ),
     LearningRateScheduler(accelerated_lr_schedule, verbose=1),
@@ -189,7 +189,7 @@ if 'lr' not in history.history:
 
 # 保存训练历史
 history_df = pd.DataFrame(history.history)
-history_df.to_excel('/kaggle/working/training_history.xlsx', index=False)
+history_df.to_excel('training_history.xlsx', index=False)
 
 # 绘制训练曲线
 plt.figure(figsize=(12, 10))
@@ -221,11 +221,11 @@ plt.bar(['train', 'val'], [train_generator.samples, val_generator.samples], colo
 plt.title('Dataset Distribution')
 
 plt.tight_layout()
-plt.savefig('/kaggle/working/training_metrics.png', dpi=150)
+plt.savefig('training_metrics.png', dpi=150)
 plt.close()
 
 # 加载最佳模型
-model = load_model('/kaggle/working/best_model.keras')
+model = load_model('best_model.keras')
 
 # 在验证集上评估
 print("\n在验证集上评估模型...")
@@ -277,7 +277,7 @@ for i, class_name in enumerate(class_names):
 
 # 保存类别准确率结果
 metrics_df = pd.DataFrame(class_metrics)
-metrics_df.to_excel('/kaggle/working/class_accuracy_report.xlsx', index=False)
+metrics_df.to_excel('class_accuracy_report.xlsx', index=False)
 
 # 绘制混淆矩阵热力图（简化版，只显示前20类）
 plt.figure(figsize=(15, 13))
@@ -289,7 +289,7 @@ plt.ylabel('True Label')
 plt.xticks(rotation=45, fontsize=8)
 plt.yticks(fontsize=8)
 plt.tight_layout()
-plt.savefig('/kaggle/working/confusion_matrix_top20.png', dpi=150)
+plt.savefig('confusion_matrix_top20.png', dpi=150)
 plt.close()
 
 # 绘制各类别F1分数分布
@@ -302,7 +302,7 @@ plt.title('F1 Score per Class')
 plt.ylabel('F1 Score')
 plt.legend()
 plt.tight_layout()
-plt.savefig('/kaggle/working/class_f1_scores.png', dpi=150)
+plt.savefig('class_f1_scores.png', dpi=150)
 plt.close()
 
 # 随机抽取12个验证样本可视化（节省空间）
@@ -336,7 +336,7 @@ for i in range(12):
     plt.title(title, fontsize=10, color=color)
     plt.axis('off')
 plt.tight_layout()
-plt.savefig('/kaggle/working/sample_predictions.png', dpi=150)
+plt.savefig('sample_predictions.png', dpi=150)
 plt.close()
 
 # 计算实际训练时间
