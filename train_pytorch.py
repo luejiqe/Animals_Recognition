@@ -336,10 +336,45 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
+
             # 所有 rank 都需要调用 save_checkpoint (DeepSpeed 要求)
             model_engine.save_checkpoint('checkpoints', 'best_model')
+
+            # 在 rank 0 上额外保存标准 PyTorch 格式（方便推理）
             if args.local_rank == 0:
                 print(f'模型已保存，验证损失: {val_loss:.4f}')
+
+                try:
+                    # 确保输出目录存在
+                    os.makedirs('checkpoints', exist_ok=True)
+
+                    # 提取模型权重（移除 DeepSpeed 包装）
+                    if hasattr(model_engine, 'module'):
+                        # DeepSpeed 包装的模型
+                        model_state_dict = model_engine.module.state_dict()
+                    else:
+                        model_state_dict = model_engine.state_dict()
+
+                    # 保存为标准 PyTorch 格式
+                    pytorch_model_path = 'checkpoints/pytorch_model.pt'
+                    torch.save(model_state_dict, pytorch_model_path)
+
+                    file_size_mb = os.path.getsize(pytorch_model_path) / (1024 * 1024)
+                    print(f'✅ PyTorch 格式模型已保存: {pytorch_model_path} ({file_size_mb:.2f} MB)')
+                    print(f'   可直接用于推理: state_dict = torch.load("{pytorch_model_path}")')
+
+                except PermissionError:
+                    # 如果 checkpoints/ 目录无写权限，保存到当前目录
+                    alt_path = './pytorch_model.pt'
+                    torch.save(model_state_dict, alt_path)
+                    file_size_mb = os.path.getsize(alt_path) / (1024 * 1024)
+                    print(f'⚠️  checkpoints/ 目录无写权限')
+                    print(f'✅ PyTorch 模型已保存到当前目录: {alt_path} ({file_size_mb:.2f} MB)')
+                    print(f'   可直接用于推理: state_dict = torch.load("{alt_path}")')
+
+                except Exception as e:
+                    print(f'⚠️  保存 PyTorch 格式失败: {str(e)}')
+                    print(f'   DeepSpeed 检查点已保存，可稍后使用 convert_final.py 转换')
         else:
             patience_counter += 1
 

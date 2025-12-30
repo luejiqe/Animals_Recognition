@@ -1,2 +1,6 @@
 Animal/
 .claude/
+test/
+checkpoints/
+predictions.csv
+pytorch_model.pt
