@@ -606,38 +606,80 @@ class AnimalRecognitionApp:
         upload_frame = ttk.Frame(left_frame, style="Card.TFrame", padding=20)
         upload_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 标题
-        upload_title = ttk.Label(upload_frame, text="图片上传", font=("Segoe UI", 16, "bold"), style="White.TLabel")
-        upload_title.pack(pady=(0, 15))
+        # 标题区域
+        title_container = ttk.Frame(upload_frame, style="White.TFrame")
+        title_container.pack(fill=tk.X, pady=(0, 10))
 
-        # 图片显示区域 - 带边框和圆角
-        image_container = ttk.Frame(upload_frame, style="Card.TFrame", padding=10)
-        image_container.pack(fill=tk.BOTH, expand=True, pady=10)
+        upload_title = ttk.Label(title_container, text="🖼️ 图片上传识别",
+                                font=("Segoe UI", 16, "bold"), style="White.TLabel")
+        upload_title.pack(side=tk.LEFT)
 
-        # 创建图片标签并放在容器中
+        # 图片显示区域 - 使用Canvas来更好地控制图片显示
+        image_display_frame = ttk.Frame(upload_frame, style="Card.TFrame")
+        image_display_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # 创建带滚动条的Canvas（如果图片很大）
+        self.image_canvas = tk.Canvas(image_display_frame, bg="#f8fafc",
+                                      highlightthickness=1,
+                                      highlightbackground=self.colors['border'])
+        self.image_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # 在Canvas中创建图片标签
         self.recognition_image_label = ttk.Label(
-            image_container,
-            text="请上传动物图片",
+            self.image_canvas,
+            text="📸 请上传动物图片进行识别\n\n支持格式: JPG, PNG, BMP\n建议尺寸: 456×456 或更大",
             anchor=tk.CENTER,
             font=("Segoe UI", 12),
-            style="White.TLabel"
+            style="White.TLabel",
+            justify=tk.CENTER
         )
-        self.recognition_image_label.pack(fill=tk.BOTH, expand=True)
+        self.image_canvas.create_window(0, 0, anchor=tk.NW, window=self.recognition_image_label)
 
-        # 按钮区域
-        button_container = ttk.Frame(upload_frame, style="White.TFrame")
-        button_container.pack(pady=10, fill=tk.X)
+        # 绑定Canvas大小变化事件，使图片标签居中
+        def center_image(event):
+            canvas_width = event.width
+            canvas_height = event.height
+            self.image_canvas.coords(self.image_canvas.find_all()[0],
+                                    canvas_width//2, canvas_height//2)
+            self.image_canvas.itemconfig(self.image_canvas.find_all()[0], anchor=tk.CENTER)
 
-        upload_btn = ttk.Button(button_container, text="📁 上传图片", command=self.upload_image, style="Normal.TButton")
-        upload_btn.pack(side=tk.LEFT, padx=10, pady=10)
+        self.image_canvas.bind('<Configure>', center_image)
+
+        # 按钮区域 - 固定在底部，使用独立Frame确保始终可见
+        button_separator = ttk.Separator(upload_frame, orient='horizontal')
+        button_separator.pack(fill=tk.X, pady=(15, 10))
+
+        button_frame = ttk.Frame(upload_frame, style="White.TFrame")
+        button_frame.pack(fill=tk.X, pady=(0, 5))
+
+        # 创建居中的按钮容器
+        button_inner = ttk.Frame(button_frame, style="White.TFrame")
+        button_inner.pack(expand=True)
+
+        # 上传按钮
+        upload_btn = ttk.Button(button_inner, text="📁 上传图片",
+                               command=self.upload_image,
+                               style="Normal.TButton", width=18)
+        upload_btn.pack(side=tk.LEFT, padx=8, pady=5)
         upload_btn.bind("<Enter>", lambda e, b=upload_btn: b.config(style="Normal.Hover.TButton"))
         upload_btn.bind("<Leave>", lambda e, b=upload_btn: b.config(style="Normal.TButton"))
 
-        self.start_recognition_btn = ttk.Button(button_container, text="🔍 开始识别", command=self.start_recognition,
-                                               state=tk.DISABLED, style="Accent.TButton")
-        self.start_recognition_btn.pack(side=tk.RIGHT, padx=10, pady=10)
+        # 开始识别按钮
+        self.start_recognition_btn = ttk.Button(button_inner, text="🔍 开始识别",
+                                               command=self.start_recognition,
+                                               state=tk.DISABLED,
+                                               style="Accent.TButton", width=18)
+        self.start_recognition_btn.pack(side=tk.LEFT, padx=8, pady=5)
         self.start_recognition_btn.bind("<Enter>", lambda e, b=self.start_recognition_btn: b.config(style="Accent.Hover.TButton"))
         self.start_recognition_btn.bind("<Leave>", lambda e, b=self.start_recognition_btn: b.config(style="Accent.TButton"))
+
+        # 添加提示信息
+        hint_label = ttk.Label(upload_frame,
+                              text="💡 提示：上传图片后点击\"开始识别\"按钮进行AI识别",
+                              font=("Segoe UI", 9),
+                              foreground=self.colors['text_light'],
+                              style="White.TLabel")
+        hint_label.pack(pady=(5, 0))
 
         # 右侧结果区域
         right_frame = ttk.Frame(content_frame, style="Main.TFrame")
@@ -647,11 +689,26 @@ class AnimalRecognitionApp:
         result_frame = ttk.Frame(right_frame, style="Card.TFrame", padding=20)
         result_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 标题
-        result_title = ttk.Label(result_frame, text="识别结果", font=("Segoe UI", 16, "bold"), style="White.TLabel")
-        result_title.pack(pady=(0, 15))
+        # 标题区域
+        result_title_container = ttk.Frame(result_frame, style="White.TFrame")
+        result_title_container.pack(fill=tk.X, pady=(0, 10))
 
-        # 添加滚动文本框
+        result_title = ttk.Label(result_title_container, text="🎯 识别结果",
+                                font=("Segoe UI", 16, "bold"), style="White.TLabel")
+        result_title.pack(side=tk.LEFT)
+
+        # 清空结果按钮
+        clear_btn = ttk.Button(result_title_container, text="🗑️ 清空",
+                              command=lambda: self.result_text.delete(1.0, tk.END),
+                              style="Normal.TButton", width=10)
+        clear_btn.pack(side=tk.RIGHT)
+        clear_btn.bind("<Enter>", lambda e, b=clear_btn: b.config(style="Normal.Hover.TButton"))
+        clear_btn.bind("<Leave>", lambda e, b=clear_btn: b.config(style="Normal.TButton"))
+
+        # 分隔线
+        ttk.Separator(result_frame, orient='horizontal').pack(fill=tk.X, pady=(0, 15))
+
+        # 添加滚动文本框容器
         result_container = ttk.Frame(result_frame, style="White.TFrame")
         result_container.pack(fill=tk.BOTH, expand=True)
 
@@ -660,22 +717,43 @@ class AnimalRecognitionApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.result_text = tk.Text(result_container, height=15, width=50, yscrollcommand=scrollbar.set,
-                                  font=("Segoe UI", 11), wrap=tk.WORD, padx=10, pady=10,
-                                  relief=tk.FLAT, borderwidth=1, background="#f8fafc")
+                                  font=("Segoe UI", 11), wrap=tk.WORD, padx=15, pady=15,
+                                  relief=tk.FLAT, borderwidth=0, background="#ffffff",
+                                  highlightthickness=1, highlightbackground=self.colors['border'],
+                                  highlightcolor=self.colors['primary'])
         self.result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.result_text.yview)
 
-        # 配置文本标签样式
-        self.result_text.tag_configure("title", font=("Segoe UI", 14, "bold"), foreground=self.colors['primary_dark'])
-        self.result_text.tag_configure("result", font=("Segoe UI", 12), foreground=self.colors['text'])
-        self.result_text.tag_configure("highlight", font=("Segoe UI", 12, "bold"), foreground=self.colors['danger'])
-        self.result_text.tag_configure("unlock", font=("Segoe UI", 11, "italic"), foreground="#2ecc71")
+        # 配置文本标签样式 - 更丰富的样式
+        self.result_text.tag_configure("title", font=("Segoe UI", 14, "bold"),
+                                      foreground=self.colors['primary_dark'],
+                                      spacing1=10, spacing3=10)
+        self.result_text.tag_configure("result", font=("Segoe UI", 12),
+                                      foreground=self.colors['text'],
+                                      spacing1=5)
+        self.result_text.tag_configure("highlight", font=("Segoe UI", 13, "bold"),
+                                      foreground=self.colors['danger'],
+                                      spacing1=8, spacing3=8)
+        self.result_text.tag_configure("unlock", font=("Segoe UI", 11, "italic"),
+                                      foreground="#2ecc71",
+                                      spacing1=5)
+        self.result_text.tag_configure("info", font=("Segoe UI", 10),
+                                      foreground=self.colors['text_light'],
+                                      spacing1=3)
 
         # 进度条框架
-        self.progress_frame = ttk.Frame(right_frame)
-        self.progress_frame.pack(fill=tk.X, pady=(10, 0))
+        self.progress_frame = ttk.Frame(result_frame, style="White.TFrame")
+        self.progress_frame.pack(fill=tk.X, pady=(15, 0))
 
-        self.progress_bar = ttk.Progressbar(self.progress_frame, mode='indeterminate')
+        # 进度条标签
+        self.progress_label = ttk.Label(self.progress_frame, text="正在识别中...",
+                                       font=("Segoe UI", 10),
+                                       foreground=self.colors['primary'],
+                                       style="White.TLabel")
+        self.progress_label.pack(pady=(0, 5))
+
+        self.progress_bar = ttk.Progressbar(self.progress_frame, mode='indeterminate',
+                                           length=300)
         self.progress_bar.pack(fill=tk.X)
 
         # 初始隐藏进度条

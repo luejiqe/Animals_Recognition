@@ -1,3 +1,7 @@
+"""
+PyTorch DistributedDataParallel (DDP) 训练脚本
+性能优于DP，推荐用于单机多卡和多机多卡训练
+"""
 import os
 import numpy as np
 import pandas as pd
@@ -5,6 +9,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 import torchvision.transforms as transforms
 from torchvision import models
@@ -13,10 +19,8 @@ import glob
 import random
 from sklearn.metrics import confusion_matrix, classification_report
 import seaborn as sns
-import deepspeed
 import argparse
 from tqdm import tqdm
-import json
 
 
 # 设置随机种子确保可复现性
@@ -74,11 +78,10 @@ class AnimalDataset(Dataset):
         return image, label
 
 
-# 定义模型 - 添加混合精度支持
+# 定义模型
 class EfficientNetClassifier(nn.Module):
     def __init__(self, num_classes=100, dropout_rate=0.3):
         super(EfficientNetClassifier, self).__init__()
-        # 使用新的 weights 参数而不是 pretrained
         from torchvision.models import EfficientNet_B6_Weights
         self.base_model = models.efficientnet_b6(weights=EfficientNet_B6_Weights.IMAGENET1K_V1)
 
@@ -122,8 +125,8 @@ def get_lr(epoch, initial_lr=1e-4):
         return initial_lr * np.exp(0.1 * (decay_start - epoch))
 
 
-# 训练函数 - 使用 PyTorch AMP (与 DeepSpeed 兼容)
-def train_epoch(model, train_loader, criterion, optimizer, epoch, device, local_rank, use_amp=False):
+# 训练函数
+def train_epoch(model, train_loader, criterion, optimizer, scaler, epoch, device, local_rank, use_amp):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -138,18 +141,22 @@ def train_epoch(model, train_loader, criterion, optimizer, epoch, device, local_
         images = images.to(device)
         labels = labels.to(device)
 
-        # 使用自动混合精度 - DeepSpeed 会自动处理梯度缩放
+        optimizer.zero_grad()
+
+        # 混合精度训练
         if use_amp:
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 outputs = model(images)
                 loss = criterion(outputs, labels)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         else:
             outputs = model(images)
             loss = criterion(outputs, labels)
-
-        # DeepSpeed backward and step (无需手动 scaler)
-        model.backward(loss)
-        model.step()
+            loss.backward()
+            optimizer.step()
 
         running_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
@@ -165,7 +172,7 @@ def train_epoch(model, train_loader, criterion, optimizer, epoch, device, local_
 
 
 # 验证函数
-def validate(model, val_loader, criterion, device, local_rank, use_amp=False):
+def validate(model, val_loader, criterion, device, local_rank, use_amp):
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -194,47 +201,65 @@ def validate(model, val_loader, criterion, device, local_rank, use_amp=False):
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    # 关键修复: 跨GPU聚合验证指标
-    # 将损失和总数转换为 tensor 以便同步
+    # DDP 跨GPU聚合验证指标
     loss_tensor = torch.tensor([running_loss], device=device)
     total_tensor = torch.tensor([total], device=device)
     correct_tensor = torch.tensor([correct], device=device)
 
     # AllReduce 聚合所有 GPU 的统计量
-    torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
-    torch.distributed.all_reduce(total_tensor, op=torch.distributed.ReduceOp.SUM)
-    torch.distributed.all_reduce(correct_tensor, op=torch.distributed.ReduceOp.SUM)
+    dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
 
-    # 计算全局平均指标(所有GPU看到的值相同)
-    val_loss = loss_tensor.item() / len(val_loader) / torch.distributed.get_world_size()
+    # 计算全局平均指标
+    val_loss = loss_tensor.item() / len(val_loader) / dist.get_world_size()
     val_acc = 100 * correct_tensor.item() / total_tensor.item()
 
     return val_loss, val_acc, all_preds, all_labels
 
 
+def cleanup():
+    """清理分布式进程组"""
+    dist.destroy_process_group()
+
+
 def main():
     # 参数解析
-    parser = argparse.ArgumentParser(description='Animal Classification with DeepSpeed')
-    parser.add_argument('--local_rank', type=int, default=-1, help='local rank passed from distributed launcher')
+    parser = argparse.ArgumentParser(description='Animal Classification with DistributedDataParallel')
+    parser.add_argument('--local_rank', type=int, default=-1, help='local rank for distributed training')
     parser.add_argument('--data_dir', type=str, default='Animal', help='数据集路径')
     parser.add_argument('--num_classes', type=int, default=100, help='类别数量')
     parser.add_argument('--img_size', type=int, default=456, help='图像尺寸')
-    parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
+    parser.add_argument('--batch_size', type=int, default=64, help='每个GPU的批次大小')
     parser.add_argument('--epochs', type=int, default=20, help='训练轮数')
     parser.add_argument('--initial_lr', type=float, default=1e-4, help='初始学习率')
     parser.add_argument('--dropout_rate', type=float, default=0.3, help='Dropout比率')
     parser.add_argument('--patience', type=int, default=5, help='早停等待轮数')
-    parser.add_argument('--use_amp', action='store_true', help='使用自动混合精度训练')
+    parser.add_argument('--use_amp', action='store_true', help='使用混合精度训练')
 
-    # DeepSpeed 会添加额外的参数
-    parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
-    # 初始化 DeepSpeed
-    deepspeed.init_distributed()
-    args.local_rank = int(os.environ['LOCAL_RANK'])
+    # 初始化分布式环境
+    # 支持 torch.distributed.launch 和 torchrun
+    if 'LOCAL_RANK' in os.environ:
+        args.local_rank = int(os.environ['LOCAL_RANK'])
+
+    dist.init_process_group(backend='nccl')
+
+    args.local_rank = dist.get_rank()
     torch.cuda.set_device(args.local_rank)
     device = torch.device('cuda', args.local_rank)
+
+    if args.local_rank == 0:
+        print(f"=" * 80)
+        print(f"DistributedDataParallel (DDP) 训练配置")
+        print(f"=" * 80)
+        print(f"World Size: {dist.get_world_size()}")
+        print(f"使用设备: {device}")
+        print(f"每GPU批次大小: {args.batch_size}")
+        print(f"有效批次大小: {args.batch_size * dist.get_world_size()}")
+        print(f"混合精度: {'BF16' if args.use_amp else 'FP32'}")
+        print(f"=" * 80)
 
     # 数据增强
     train_transform = transforms.Compose([
@@ -258,7 +283,7 @@ def main():
     train_dataset = AnimalDataset(args.data_dir, transform=train_transform, is_train=True)
     val_dataset = AnimalDataset(args.data_dir, transform=val_transform, is_train=False)
 
-    # 使用分布式采样器
+    # 使用 DistributedSampler
     train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
 
@@ -282,31 +307,23 @@ def main():
     if args.local_rank == 0:
         print(f"训练样本数: {len(train_dataset)}, 验证样本数: {len(val_dataset)}")
         print(f"类别数: {args.num_classes}")
-        print(f"混合精度训练: {'启用 (BF16)' if args.use_amp else '禁用 (FP32)'}")
 
     # 创建模型
     model = EfficientNetClassifier(num_classes=args.num_classes, dropout_rate=args.dropout_rate)
+    model = model.to(device)
+
+    # 使用 DistributedDataParallel 包装模型
+    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
+
+    if args.local_rank == 0:
+        print(f"模型已使用 DDP 包装在 rank {args.local_rank}")
 
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.initial_lr)
 
-    # 初始化 DeepSpeed - 对于 AMP,禁用 DeepSpeed 的 FP16/BF16
-    # 创建临时配置
-    if args.use_amp:
-        # 读取配置文件并禁用其 FP16/BF16
-        with open(args.deepspeed_config, 'r') as f:
-            ds_config = json.load(f)
-        ds_config['fp16']['enabled'] = False
-        ds_config['bf16']['enabled'] = False
-        args.deepspeed_config = ds_config
-
-    model_engine, optimizer, _, _ = deepspeed.initialize(
-        args=args,
-        model=model,
-        optimizer=optimizer,
-        model_parameters=model.parameters()
-    )
+    # 混合精度训练
+    scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
 
     # 训练历史记录
     history = {
@@ -322,6 +339,7 @@ def main():
 
     # 训练循环
     for epoch in range(args.epochs):
+        # 设置 epoch 用于 DistributedSampler 的随机种子
         train_sampler.set_epoch(epoch)
 
         # 调整学习率
@@ -334,13 +352,13 @@ def main():
 
         # 训练
         train_loss, train_acc = train_epoch(
-            model_engine, train_loader, criterion, optimizer,
+            model, train_loader, criterion, optimizer, scaler,
             epoch+1, device, args.local_rank, args.use_amp
         )
 
         # 验证
         val_loss, val_acc, val_preds, val_labels = validate(
-            model_engine, val_loader, criterion, device, args.local_rank, args.use_amp
+            model, val_loader, criterion, device, args.local_rank, args.use_amp
         )
 
         # 记录历史
@@ -354,65 +372,51 @@ def main():
             print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
             print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%')
 
-        # 保存最佳模型 - DeepSpeed checkpoint 需要所有 rank 参与
+        # 保存最佳模型（仅 rank 0）
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
 
-            # 所有 rank 都需要调用 save_checkpoint (DeepSpeed 要求)
-            model_engine.save_checkpoint('checkpoints', 'best_model')
-
-            # 在 rank 0 上额外保存标准 PyTorch 格式（方便推理）
             if args.local_rank == 0:
-                print(f'模型已保存,验证损失: {val_loss:.4f}')
-
                 try:
-                    # 确保输出目录存在
                     os.makedirs('checkpoints', exist_ok=True)
 
-                    # 提取模型权重（移除 DeepSpeed 包装）
-                    if hasattr(model_engine, 'module'):
-                        # DeepSpeed 包装的模型
-                        model_state_dict = model_engine.module.state_dict()
+                    # 提取模型权重（移除 DDP 包装）
+                    if isinstance(model, DDP):
+                        model_state_dict = model.module.state_dict()
                     else:
-                        model_state_dict = model_engine.state_dict()
+                        model_state_dict = model.state_dict()
 
                     # 保存为标准 PyTorch 格式
-                    pytorch_model_path = 'checkpoints/pytorch_model.pt'
+                    pytorch_model_path = 'checkpoints/pytorch_model_ddp.pt'
                     torch.save(model_state_dict, pytorch_model_path)
 
                     file_size_mb = os.path.getsize(pytorch_model_path) / (1024 * 1024)
-                    print(f'✅ PyTorch 格式模型已保存: {pytorch_model_path} ({file_size_mb:.2f} MB)')
-                    print(f'   可直接用于推理: state_dict = torch.load("{pytorch_model_path}")')
+                    print(f'✅ 模型已保存: {pytorch_model_path} ({file_size_mb:.2f} MB)')
+                    print(f'   验证损失: {val_loss:.4f}')
 
                 except PermissionError:
-                    # 权限错误，尝试保存到当前目录
-                    try:
-                        alt_path = './pytorch_model.pt'
-                        torch.save(model_state_dict, alt_path)
-                        file_size_mb = os.path.getsize(alt_path) / (1024 * 1024)
-                        print(f'⚠️  checkpoints/ 目录无写权限')
-                        print(f'✅ PyTorch 模型已保存到当前目录: {alt_path} ({file_size_mb:.2f} MB)')
-                    except Exception as e2:
-                        print(f'❌ 保存 PyTorch 格式失败: {str(e2)}')
-                        print(f'   DeepSpeed 检查点已保存，可稍后使用 convert_final.py 转换')
+                    alt_path = './pytorch_model_ddp.pt'
+                    torch.save(model_state_dict, alt_path)
+                    file_size_mb = os.path.getsize(alt_path) / (1024 * 1024)
+                    print(f'⚠️  checkpoints/ 目录无写权限')
+                    print(f'✅ 模型已保存到当前目录: {alt_path} ({file_size_mb:.2f} MB)')
 
                 except Exception as e:
-                    print(f'⚠️  保存 PyTorch 格式失败: {str(e)}')
-                    print(f'   DeepSpeed 检查点已保存，可稍后使用 convert_final.py 转换')
+                    print(f'⚠️  保存模型失败: {str(e)}')
         else:
             patience_counter += 1
 
         # 早停
         if patience_counter >= args.patience:
             if args.local_rank == 0:
-                print(f'\n早停触发,已等待 {args.patience} 轮无改善')
+                print(f'\n早停触发，已等待 {args.patience} 轮无改善')
             break
 
-    # 保存训练历史(仅在主进程)
+    # 保存训练历史（仅在主进程）
     if args.local_rank == 0:
         history_df = pd.DataFrame(history)
-        history_df.to_csv('training_history.csv', index=False)
+        history_df.to_csv('training_history_ddp.csv', index=False)
 
         # 绘制训练曲线
         plt.figure(figsize=(12, 10))
@@ -420,13 +424,13 @@ def main():
         plt.subplot(2, 2, 1)
         plt.plot(history['train_loss'], label='train loss')
         plt.plot(history['val_loss'], label='val loss')
-        plt.title('Training & Validation Loss')
+        plt.title('Training & Validation Loss (DDP)')
         plt.legend()
 
         plt.subplot(2, 2, 2)
         plt.plot(history['train_acc'], label='train acc')
         plt.plot(history['val_acc'], label='val acc')
-        plt.title('Training & Validation Accuracy')
+        plt.title('Training & Validation Accuracy (DDP)')
         plt.legend()
 
         plt.subplot(2, 2, 3)
@@ -441,7 +445,7 @@ def main():
         plt.title('Dataset Distribution')
 
         plt.tight_layout()
-        plt.savefig('training_metrics.png', dpi=150)
+        plt.savefig('training_metrics_ddp.png', dpi=150)
         plt.close()
 
         # 生成分类报告
@@ -485,14 +489,17 @@ def main():
             })
 
         metrics_df = pd.DataFrame(class_metrics)
-        metrics_df.to_csv('class_accuracy_report.csv', index=False)
+        metrics_df.to_csv('class_accuracy_report_ddp.csv', index=False)
 
         print("\n" + "="*50)
-        print("训练完成!")
+        print("训练完成！")
         print(f"最佳验证损失: {best_val_loss:.4f}")
-        print(f"训练历史已保存为: training_history.csv")
-        print(f"类别准确率报告已保存为: class_accuracy_report.csv")
+        print(f"训练历史已保存为: training_history_ddp.csv")
+        print(f"类别准确率报告已保存为: class_accuracy_report_ddp.csv")
         print("="*50)
+
+    # 清理分布式进程组
+    cleanup()
 
 
 if __name__ == '__main__':

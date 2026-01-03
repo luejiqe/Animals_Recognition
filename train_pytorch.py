@@ -208,7 +208,7 @@ def main():
     parser.add_argument('--data_dir', type=str, default='Animal', help='数据集路径')
     parser.add_argument('--num_classes', type=int, default=100, help='类别数量')
     parser.add_argument('--img_size', type=int, default=456, help='图像尺寸')
-    parser.add_argument('--batch_size', type=int, default=12, help='批次大小')
+    parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
     parser.add_argument('--epochs', type=int, default=20, help='训练轮数')
     parser.add_argument('--initial_lr', type=float, default=1e-4, help='初始学习率')
     parser.add_argument('--dropout_rate', type=float, default=0.3, help='Dropout比率')
